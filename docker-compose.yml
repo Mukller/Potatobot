@@ -1,6 +1,31 @@
-version: "3.9"
-
 services:
+  db:
+    image: postgres:16-alpine
+    container_name: potatobot-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: potato
+      POSTGRES_PASSWORD: potato_pw_2026
+      POSTGRES_DB: potatobot
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - potatobot_pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:55433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U potato -d potatobot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+
+
   bot:
     build:
       context: .
@@ -11,6 +36,10 @@ services:
     env_file: .env
     environment:
       - PYTHONPATH=/app
+      - DATABASE_URL=postgresql://potato:potato_pw_2026@db:5432/potatobot
+    depends_on:
+      db:
+        condition: service_healthy
     ports:
       - "8082:8080"
     healthcheck:
@@ -30,3 +59,6 @@ services:
           memory: 512M
         reservations:
           memory: 128M
+
+volumes:
+  potatobot_pgdata:

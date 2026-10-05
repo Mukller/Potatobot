@@ -1,0 +1,26 @@
+# Secrets: never commit. Contains the bot token and the database password.
+.env
+.env.*
+!.env.example
+
+# Runtime logs and state
+*.log
+healthcheck.log
+backup.log
+
+# Database backups and any tarball I make before a refactor
+backups/
+*.tar.gz
+*.bak
+*.bak-*
+docker-compose.yml.bak-*
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local scratch
+new_healthcheck.sh

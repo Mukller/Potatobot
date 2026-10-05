@@ -16,7 +16,6 @@ class ChaosExperimentType(Enum):
     LATENCY_INJECTION = "latency_injection"
     ERROR_INJECTION = "error_injection"
     DB_CONNECTION_FAILURE = "db_connection_failure"
-    REDIS_CONNECTION_FAILURE = "redis_connection_failure"
     PARTIAL_OUTAGE = "partial_outage"
     RESOURCE_EXHAUSTION = "resource_exhaustion"
     NETWORK_PARTITION = "network_partition"
@@ -65,7 +64,7 @@ class ChaosEngineeringService:
         self._latency_ms = 0
         self._error_rate = 0.0
         self._db_failure = False
-        self._redis_failure = False
+        self._db_failure = False
 
     # ===== Experiment Management =====
     def create_experiment(
@@ -171,10 +170,10 @@ class ChaosEngineeringService:
             self._db_failure = False
 
         elif experiment.type == ChaosExperimentType.REDIS_CONNECTION_FAILURE:
-            self._redis_failure = True
+            self._db_failure = True
             duration = config.get("duration_seconds", 30)
             await asyncio.sleep(duration)
-            self._redis_failure = False
+            self._db_failure = False
 
         elif experiment.type == ChaosExperimentType.PARTIAL_OUTAGE:
             # Simulate partial outage - some requests fail
@@ -198,11 +197,11 @@ class ChaosEngineeringService:
 
         elif experiment.type == ChaosExperimentType.NETWORK_PARTITION:
             # Simulate network issues
-            self._redis_failure = True
+            self._db_failure = True
             self._db_failure = True
             duration = config.get("duration_seconds", 30)
             await asyncio.sleep(duration)
-            self._redis_failure = False
+            self._db_failure = False
             self._db_failure = False
 
     async def abort_experiment(self, experiment_id: str) -> bool:
@@ -216,7 +215,7 @@ class ChaosEngineeringService:
         self._latency_ms = 0
         self._error_rate = 0.0
         self._db_failure = False
-        self._redis_failure = False
+        self._db_failure = False
 
         experiment.status = ExperimentStatus.ABORTED
         experiment.completed_at = time.time()
@@ -248,9 +247,9 @@ class ChaosEngineeringService:
         """Check if DB failure is injected."""
         return self._db_failure
 
-    async def check_redis_failure(self) -> bool:
+    async def check_db_failure(self) -> bool:
         """Check if Redis failure is injected."""
-        return self._redis_failure
+        return self._db_failure
 
     # ===== Metrics Collection =====
     async def _collect_metrics(self) -> Dict:
@@ -328,7 +327,7 @@ class ChaosEngineeringService:
             },
             {
                 "name": "Redis Failure",
-                "type": "redis_connection_failure",
+                "type": "db_connection_failure",
                 "description": "Simulate Redis failure for 30 seconds",
                 "config": {"duration_seconds": 30},
             },
@@ -401,7 +400,7 @@ def disable_chaos():
     service._latency_ms = 0
     service._error_rate = 0.0
     service._db_failure = False
-    service._redis_failure = False
+    service._db_failure = False
     return "❌ Chaos Engineering выключен"
 
 

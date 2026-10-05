@@ -29,9 +29,6 @@ class Settings(BaseSettings):
     history_retention_hours: int = Field(48, validation_alias="HISTORY_RETENTION_HOURS")
     cleanup_interval_seconds: int = Field(3600, validation_alias="CLEANUP_INTERVAL_SECONDS")
 
-    # Cache
-    leaderboard_cache_ttl: int = Field(30, validation_alias="LEADERBOARD_CACHE_TTL")
-
     # Rate limiting
     rate_limit_requests: int = Field(30, validation_alias="RATE_LIMIT_REQUESTS")
     rate_limit_window: int = Field(60, validation_alias="RATE_LIMIT_WINDOW")
@@ -40,22 +37,19 @@ class Settings(BaseSettings):
     web_host: str = Field("0.0.0.0", validation_alias="WEB_HOST")
     web_port: int = Field(8080, validation_alias="WEB_PORT")
 
+
     # Logging
     log_level: str = Field("INFO", validation_alias="LOG_LEVEL")
     log_format: str = Field("json", validation_alias="LOG_FORMAT")
 
-    # Redis
-    redis_url: str = Field("redis://localhost:6379/0", validation_alias="REDIS_URL")
-    redis_max_connections: int = Field(50, validation_alias="REDIS_MAX_CONNECTIONS")
 
     # Sentry
     sentry_dsn: str | None = Field(None, validation_alias="SENTRY_DSN")
     sentry_traces_sample_rate: float = Field(0.1, validation_alias="SENTRY_TRACES_SAMPLE_RATE")
     sentry_profiles_sample_rate: float = Field(0.1, validation_alias="SENTRY_PROFILES_SAMPLE_RATE")
 
-    # Admin panel
+    # Admin (Telegram-only panel: gate for every admin action)
     admin_user_ids: str = Field("", validation_alias="ADMIN_USER_IDS")  # comma-separated
-    admin_session_secret: str = Field("changeme", validation_alias="ADMIN_SESSION_SECRET")
 
     # Daily bonus
     daily_bonus_enabled: bool = Field(True, validation_alias="DAILY_BONUS_ENABLED")
@@ -83,9 +77,17 @@ class Settings(BaseSettings):
     def validate_db_url(cls, v: str) -> str:
         if not v.startswith(("postgresql://", "postgres://")):
             raise ValueError("DATABASE_URL must be postgresql://...")
-        if "sslmode=" not in v:
-            return v + ("&" if "?" in v else "?") + "sslmode=require"
-        return v
+        if "sslmode=" in v:
+            return v
+        # Only managed (public) hosts require TLS. Local / docker-network
+        # hosts (no dot in hostname, or loopback) must stay plain.
+        host = v.split("://", 1)[-1].split("@")[-1].split("/")[0].split(":")[0]
+        local = host in ("localhost", "127.0.0.1", "::1", "db", "postgres", "pg")
+        if "." not in host and not local:
+            return v
+        if local:
+            return v
+        return v + ("&" if "?" in v else "?") + "sslmode=require"
 
     @property
     def admin_ids(self) -> list[int]:
