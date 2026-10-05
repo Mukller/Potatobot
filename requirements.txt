@@ -1,31 +1,23 @@
-# Core dependencies
+# Dependencies actually imported by app/ and tests/ (verified by grep, 2026-10-06).
+# Kept deliberately short: an unused package is attack surface and a lie about
+# what the bot needs.
+
+# Bot framework
 aiogram==3.13.1
-asyncpg==0.29.0
+
+# Web server (health + metrics only) and database
 aiohttp==3.9.5
-psycopg2-binary==2.9.9
-
-# Redis
-
-# Configuration
-python-dotenv==1.0.1
-pydantic==2.9.2
-pydantic-settings==2.3.4
-
-# Logging
-structlog==24.1.0
-
-# Error tracking
-sentry-sdk==1.45.0
-
-# Metrics
-prometheus-client==0.19.0
-
-# Database migrations
+asyncpg==0.29.0
 sqlalchemy==2.0.32
 
-# Admin panel
-jinja2==3.1.4
-aiohttp-jinja2==1.5.0
+# Config and logging
+pydantic==2.9.2
+pydantic-settings==2.3.4
+structlog==24.1.0
 
-# Web App
-aiohttp-session==2.12.0
+# Metrics and error tracking
+prometheus-client==0.19.0
+sentry-sdk==1.45.0
+
+# Test
+pytest

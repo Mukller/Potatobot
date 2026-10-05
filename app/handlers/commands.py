@@ -1,4 +1,4 @@
-"""Command handlers: basic, dig, stats, webapp."""
+"""Command handlers: dig, stats, history, leaderboard, keyboard."""
 
 import time
 import random
