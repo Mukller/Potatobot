@@ -1,17 +1,19 @@
 """Services package."""
 
 # Core services
+from app.services.heartbeat import (
+    HeartbeatService,
+    HEARTBEAT_FILE,
+    heartbeat_age,
+)
 from app.services.core import (
     UserService,
     DigService,
     DailyBonusService,
     CleanupService,
-    RedisService,
     get_dig_service,
     get_daily_bonus_service,
     get_cleanup_service,
-    get_redis,
-    close_redis,
 )
 
 # Feature services
@@ -49,17 +51,18 @@ from app.services.chaos import (
 )
 
 __all__ = [
+    # Heartbeat
+    "HeartbeatService",
+    "HEARTBEAT_FILE",
+    "heartbeat_age",
     # Core
     "UserService",
     "DigService",
     "DailyBonusService",
     "CleanupService",
-    "RedisService",
     "get_dig_service",
     "get_daily_bonus_service",
     "get_cleanup_service",
-    "get_redis",
-    "close_redis",
     # Features
     "AchievementService",
     "get_achievement_service",

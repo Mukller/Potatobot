@@ -21,7 +21,6 @@ settings = get_settings()
 _dig_service = None
 _daily_bonus_service = None
 _cleanup_service = None
-_redis_service = None
 
 
 # ===== DigService =====
@@ -34,13 +33,14 @@ class DigService:
         user = await self.db.get_or_create_user(tg_id, username)
         now = time.time()
 
-        # Cooldown check
-        if user.last_dig_time and (now - user.last_dig_time) < settings.dig_cooldown_seconds:
+        # Cooldown is enforced atomically in the UPDATE below; this early check
+        # only produces a nicer message without a round trip.
+        if user.last_dig_time and 0 <= (now - user.last_dig_time) < settings.dig_cooldown_seconds:
             remaining = int(settings.dig_cooldown_seconds - (now - user.last_dig_time))
             raise CooldownError(remaining)
 
         # Anti-cheat: minimum interval
-        if settings.anticheat_enabled and user.last_dig_time and (now - user.last_dig_time) < settings.anticheat_min_dig_interval:
+        if settings.anticheat_enabled and user.last_dig_time and 0 <= (now - user.last_dig_time) < settings.anticheat_min_dig_interval:
             raise ValidationError("Слишком быстро! Подожди немного.")
 
         # Generate weight
@@ -55,9 +55,12 @@ class DigService:
                 logger.warning("anticheat_triggered", user_id=tg_id, total_kg_hour=total_kg_hour)
                 raise ValidationError("Подозрительная активность. Попробуй позже.")
 
-        # Update user and save dig
-        user = await self.db.update_user_dig(user.user_id, kg, now)
-        dig_id = await self.db.add_dig_record(user.user_id, kg, now)
+        # Atomic: cooldown guard + weight update + history row in one
+        # transaction. A double tap can no longer slip past the cooldown.
+        user, dig_id, remaining = await self.db.dig_with_cooldown(
+            user.user_id, kg, now, settings.dig_cooldown_seconds)
+        if user is None:
+            raise CooldownError(remaining or settings.dig_cooldown_seconds)
 
         # Check achievements
         from app.services import get_achievement_service
@@ -119,6 +122,17 @@ class DailyBonusService:
     def set_cached_status(self, user_id: int, status: DailyBonusStatus, ttl: int = 60):
         key = f"daily_status_{user_id}"
         self._cache[key] = (time.time() + ttl, status)
+        self._evict_expired(time.time())
+
+    def _evict_expired(self, now: float) -> None:
+        """Bounded cache: drop expired entries for everyone, not just on access."""
+        if len(self._cache) < 512:
+            return
+        for k in [k for k, (exp, _st) in self._cache.items() if now > exp]:
+            self._cache.pop(k, None)
+        # hard cap in case entries are all fresh
+        while len(self._cache) > 2048:
+            self._cache.pop(next(iter(self._cache)), None)
 
     async def get_status(self, tg_id: int) -> dict:
         cached = self.get_cached_status(tg_id)
@@ -143,7 +157,8 @@ class DailyBonusService:
 
         streak = 0
         if user.last_dig_time:
-            days_diff = int((today_start - (user.last_dig_time // 86400) * 86400) // 86400)
+            last_day_start = int(user.last_dig_time // 86400) * 86400
+            days_diff = max(0, (today_start - last_day_start) // 86400)
             if days_diff <= 1:
                 streak = days_diff
 
@@ -178,8 +193,11 @@ class DailyBonusService:
         kg = status["next_bonus_kg"]
         now = time.time()
 
-        user = await self.db.update_user_dig(user.user_id, kg, now)
-        dig_id = await self.db.add_dig_record(user.user_id, kg, now)
+        # Atomic, same guarantees as a dig: cooldown guard + row + history.
+        user, dig_id, remaining = await self.db.bonus_with_cooldown(
+            user.user_id, kg, now, 86400)
+        if user is None:
+            raise ValidationError("Бонус уже получен сегодня")
 
         # Check achievements
         from app.services import get_achievement_service
@@ -246,97 +264,10 @@ class CleanupService:
         deleted = await self.db.cleanup_old_history(settings.history_retention_hours * 3600)
         if deleted > 0:
             logger.info("history_cleaned", deleted=deleted)
+        # The sessions/counters tables this used to prune belonged to the web
+        # panel and its signature-less HTTP API. Both are gone, so dig_history
+        # is the only table that grows, and it is trimmed above.
 
-
-# ===== RedisService =====
-
-class RedisService:
-    def __init__(self):
-        self._pool = None
-        self._connected = False
-
-    async def connect(self):
-        try:
-            import redis.asyncio as redis
-            self._pool = redis.ConnectionPool.from_url(
-                settings.redis_url,
-                max_connections=settings.redis_max_connections,
-                decode_responses=True,
-            )
-            self._redis = redis.Redis(connection_pool=self._pool)
-            await self._redis.ping()
-            self._connected = True
-            logger.info("redis_connected")
-        except Exception as e:
-            logger.warning("redis_connection_failed", error=str(e))
-            self._connected = False
-
-    def _no_redis(self, func):
-        """Decorator to gracefully handle missing Redis."""
-        async def wrapper(*args, **kwargs):
-            if not self._connected:
-                return None
-            try:
-                return await func(*args, **kwargs)
-            except Exception as e:
-                logger.warning("redis_operation_failed", error=str(e))
-                return None
-        return wrapper
-
-    @_no_redis
-    async def get(self, key: str) -> Optional[str]:
-        return await self._redis.get(key)
-
-    @_no_redis
-    async def set(self, key: str, value: str, ex: Optional[int] = None) -> bool:
-        return await self._redis.set(key, value, ex=ex)
-
-    @_no_redis
-    async def delete(self, key: str) -> int:
-        return await self._redis.delete(key)
-
-    @_no_redis
-    async def exists(self, key: str) -> bool:
-        return await self._redis.exists(key)
-
-    @_no_redis
-    async def incr(self, key: str) -> int:
-        return await self._redis.incr(key)
-
-    @_no_redis
-    async def expire(self, key: str, seconds: int) -> bool:
-        return await self._redis.expire(key, seconds)
-
-    @_no_redis
-    async def get_session(self, session_id: str) -> Optional[int]:
-        user_id = await self._redis.get(f"session:{session_id}")
-        return int(user_id) if user_id else None
-
-    @_no_redis
-    async def set_session(self, session_id: str, user_id: int, ttl: int = 86400) -> bool:
-        return await self._redis.set(f"session:{session_id}", str(user_id), ex=ttl)
-
-    @_no_redis
-    async def delete_session(self, session_id: str) -> int:
-        return await self._redis.delete(f"session:{session_id}")
-
-    @_no_redis
-    async def cache_leaderboard(self, key: str, data: str, ttl: int = 30) -> bool:
-        return await self._redis.set(key, data, ex=ttl)
-
-    @_no_redis
-    async def get_cached_leaderboard(self, key: str) -> Optional[str]:
-        return await self._redis.get(key)
-
-    @_no_redis
-    async def invalidate_leaderboard(self, key: str) -> int:
-        return await self._redis.delete(key)
-
-    async def close(self):
-        if self._pool:
-            await self._pool.disconnect()
-            self._connected = False
-            logger.info("redis_disconnected")
 
 
 # ===== UserService =====
@@ -383,19 +314,6 @@ def get_cleanup_service(db: Database) -> CleanupService:
     return _cleanup_service
 
 
-def get_redis() -> RedisService:
-    global _redis_service
-    if _redis_service is None:
-        _redis_service = RedisService()
-    return _redis_service
-
-
-async def close_redis():
-    global _redis_service
-    if _redis_service:
-        await _redis_service.close()
-        _redis_service = None
-
 
 # ===== Export for main.py =====
 
@@ -403,11 +321,8 @@ __all__ = [
     "DigService",
     "DailyBonusService",
     "CleanupService",
-    "RedisService",
     "UserService",
     "get_dig_service",
     "get_daily_bonus_service",
     "get_cleanup_service",
-    "get_redis",
-    "close_redis",
 ]

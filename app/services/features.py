@@ -9,6 +9,7 @@ from app.config import get_settings
 from app.database import Database, User, LeaderboardEntry
 from app.utils.logging import get_logger
 from app.utils.cache import TTLCache
+from app.exceptions import ValidationError, UserNotFoundError, CooldownError
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -60,8 +61,10 @@ ACHIEVEMENTS = {
 
 
 class AchievementService:
+    """Achievements are evaluated on each dig and persisted, once each."""
+
     def __init__(self):
-        self._user_cache = TTLCache(300)  # 5 min cache
+        self.db: Optional[Database] = None
 
     def get_achievement(self, ach_id: str) -> Optional[Achievement]:
         return ACHIEVEMENTS.get(ach_id)
@@ -70,40 +73,103 @@ class AchievementService:
         return list(ACHIEVEMENTS.values())
 
     async def get_user_achievements(self, user_id: int) -> set[str]:
-        key = f"achievements_{user_id}"
-        cached = self._user_cache.get(key)
-        if cached is not None:
-            return cached
+        """Read unlocked achievements from the database (no cache: cheap, and
+        correctness beats a 5-minute stale list)."""
+        if self.db is None:
+            return set()
+        try:
+            async with self.db.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT achievement_id FROM user_achievements WHERE user_id = $1",
+                    user_id,
+                )
+        except Exception as e:
+            logger.warning("achievements_read_failed", user_id=user_id, error=str(e))
+            return set()
+        return {r["achievement_id"] for r in rows}
 
-        # In real implementation, this would come from database
-        # For now, we check conditions dynamically
-        # This is a simplified version - in production you'd store unlocked achievements in DB
-        return set()
+    async def unlock(self, user_id: int, ach_id: str) -> bool:
+        """Unlock if not already. Returns True only when it was newly added."""
+        if self.db is None:
+            return False
+        try:
+            async with self.db.acquire() as conn:
+                res = await conn.execute(
+                    """
+                    INSERT INTO user_achievements (user_id, achievement_id, unlocked_at)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    user_id, ach_id, time.time(),
+                )
+        except Exception as e:
+            # cosmetic feature: never let it break the dig that triggered it
+            logger.warning("achievement_unlock_failed", user_id=user_id,
+                           achievement=ach_id, error=str(e))
+            return False
+        return res.endswith("1")  # "INSERT 0 1" vs "INSERT 0 0"
 
-    async def check_achievements(self, user_id: int, last_dig_kg: float, total_kg: float) -> list[dict]:
-        """Check and unlock achievements for user."""
-        # This is a simplified implementation
-        # In production, you'd query the database for already unlocked achievements
-        # and check conditions against user stats
-        unlocked = []
+    async def check_achievements(self, user_id: int, last_dig_kg: float,
+                                 total_kg: float) -> list[dict]:
+        """Evaluate every condition and persist the ones that just fired."""
+        if self.db is None:
+            return []
 
-        # Example checks (would need DB access for real implementation)
+        digs_count = 0
+        try:
+            async with self.db.acquire() as conn:
+                digs_count = await conn.fetchval(
+                    "SELECT digs_count FROM users WHERE user_id = $1", user_id) or 0
+        except Exception:
+            digs_count = 0
+        total = total_kg or 0.0
+
+        already = await self.get_user_achievements(user_id)
+        candidates: list[str] = []
+
+        if digs_count >= 1:
+            candidates.append("first_dig")
+        if total >= 100:
+            candidates.append("hundred_kg")
+        if total >= 1000:
+            candidates.append("thousand_kg")
+        if total >= 10000:
+            candidates.append("ten_k_kg")
+        if digs_count >= 100:
+            candidates.append("hundred_digs")
+        if digs_count >= 1000:
+            candidates.append("thousand_digs")
         if last_dig_kg >= settings.dig_max_kg * 0.99:
-            unlocked.append({"id": "max_dig", **ACHIEVEMENTS["max_dig"].__dict__})
-
+            candidates.append("max_dig")
         if last_dig_kg >= 6.9:
-            unlocked.append({"id": "lucky_dig", **ACHIEVEMENTS["lucky_dig"].__dict__})
+            candidates.append("lucky_dig")
 
-        current_hour = time.localtime().tm_hour
-        if current_hour == 6:
-            unlocked.append({"id": "early_bird", **ACHIEVEMENTS["early_bird"].__dict__})
-        elif current_hour == 3:
-            unlocked.append({"id": "night_owl", **ACHIEVEMENTS["night_owl"].__dict__})
+        hour = time.localtime().tm_hour
+        if hour == 6:
+            candidates.append("early_bird")
+        elif hour == 3:
+            candidates.append("night_owl")
 
-        # Invalidate cache
-        self._user_cache.invalidate(f"achievements_{user_id}")
+        new: list[dict] = []
+        for ach_id in candidates:
+            ach = ACHIEVEMENTS.get(ach_id)
+            if ach is None or ach_id in already:
+                continue
+            if await self.unlock(user_id, ach_id):
+                new.append({"id": ach.id, "name": ach.name,
+                            "description": ach.description, "icon": ach.icon})
 
-        return unlocked
+        if new:
+            try:
+                from app.metrics import ACHIEVEMENTS_UNLOCKED
+                for item in new:
+                    ACHIEVEMENTS_UNLOCKED.labels(
+                        achievement_id=item["id"]).inc()
+            except Exception as e:
+                logger.warning("metric_achievement_failed", error=str(e))
+            logger.info("achievements_unlocked", user_id=user_id,
+                        ids=[n["id"] for n in new])
+        return new
 
 
 # ===== ClanService =====
@@ -369,11 +435,23 @@ class MetricsService:
                 logger.error("metrics_loop_error", error=str(e))
 
     async def record_dig(self, user_id: int, kg: float, status: str):
-        # In production, this would push to Prometheus
-        pass
+        """Record a dig attempt. Must never raise - metrics cannot break a dig."""
+        try:
+            from app.metrics import DIG_COMMANDS, DIG_KG, DIG_KG_BY_USER
+            DIG_COMMANDS.labels(status=status).inc()
+            if status == "success":
+                DIG_KG.observe(kg)
+                DIG_KG_BY_USER.labels(user_id=str(user_id)).observe(kg)
+        except Exception as e:
+            logger.warning("metric_record_failed", error=str(e))
 
     async def record_daily_bonus(self, user_id: int, streak: int, status: str):
-        pass
+        try:
+            from app.metrics import DAILY_BONUS_CLAIMS, DAILY_BONUS_STREAK
+            DAILY_BONUS_CLAIMS.labels(status=status).inc()
+            DAILY_BONUS_STREAK.labels(user_id=str(user_id)).set(streak)
+        except Exception as e:
+            logger.warning("metric_record_failed", error=str(e))
 
     async def update_retention_metrics(self):
         """Update DAU/WAU/MAU and retention metrics."""
@@ -396,8 +474,16 @@ class MetricsService:
                 WHERE timestamp > EXTRACT(EPOCH FROM NOW()) - 2592000
             """) or 0
 
-            # These would be pushed to Prometheus gauges
-            logger.debug("metrics_updated", dau=dau, wau=wau, mau=mau)
+            try:
+                from app.metrics import (
+                    ACTIVE_USERS_DAILY, ACTIVE_USERS_WEEKLY, ACTIVE_USERS_MONTHLY,
+                )
+                ACTIVE_USERS_DAILY.set(dau)
+                ACTIVE_USERS_WEEKLY.set(wau)
+                ACTIVE_USERS_MONTHLY.set(mau)
+            except Exception as e:
+                logger.warning("metric_gauge_update_failed", error=str(e))
+            logger.info("metrics_updated", dau=dau, wau=wau, mau=mau)
 
 
 # ===== MLRecommendationService =====
@@ -573,10 +659,12 @@ class MLRecommendationService:
 
 # ===== Factory functions =====
 
-def get_achievement_service() -> AchievementService:
+def get_achievement_service(db: Optional[Database] = None) -> AchievementService:
     global _achievement_service
     if _achievement_service is None:
         _achievement_service = AchievementService()
+    if db is not None:
+        _achievement_service.db = db
     return _achievement_service
 
 

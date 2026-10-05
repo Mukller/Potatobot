@@ -15,10 +15,9 @@ from aiogram.types import BotCommand
 from app.config import get_settings
 from app.database import Database, init_database
 from app.services import (
+    HeartbeatService,
     get_dig_service,
     get_cleanup_service,
-    get_redis,
-    close_redis,
     get_daily_bonus_service,
     get_achievement_service,
     get_metrics_service,
@@ -26,8 +25,13 @@ from app.services import (
     get_ml_service,
     get_chaos_service,
 )
-from app.handlers import commands_router, features_router
-from app.middleware import RateLimitMiddleware, ErrorHandlingMiddleware, LoggingMiddleware
+from app.handlers import commands_router, features_router, admin_router
+from app.middleware import (
+    BanMiddleware,
+    RateLimitMiddleware,
+    ErrorHandlingMiddleware,
+    LoggingMiddleware,
+)
 from app.web import create_web_app, run_web_server
 from app.utils.logging import setup_logging, get_logger
 
@@ -59,6 +63,22 @@ def init_sentry(settings) -> None:
     logger.info("sentry_initialized")
 
 
+async def wait_for_database(db, dsn: str, attempts: int = 30, delay: float = 2.0) -> None:
+    """Postgres can still be starting up right after a reboot; retry, then create schema."""
+    last = None
+    for i in range(attempts):
+        try:
+            await db.connect()
+            logger.info("database_pool_ready", attempt=i + 1)
+            await init_database(dsn)
+            return
+        except Exception as e:
+            last = e
+            logger.warning("database_not_ready", attempt=i + 1, error=str(e))
+            await asyncio.sleep(delay)
+    raise RuntimeError(f"database unavailable after {attempts} attempts: {last}")
+
+
 async def main():
     settings = get_settings()
 
@@ -69,18 +89,13 @@ async def main():
     # Initialize Sentry
     init_sentry(settings)
 
-    # Initialize Redis
-    redis = await get_redis()
-    logger.info("redis_connected")
-
     # Initialize database
     db = Database(
         settings.database_url,
         min_size=settings.db_pool_min,
         max_size=settings.db_pool_max,
     )
-    await db.connect()
-    await init_database(settings.database_url)
+    await wait_for_database(db, settings.database_url)
     logger.info("database_connected")
 
     # Initialize services
@@ -93,6 +108,9 @@ async def main():
     metrics_service = get_metrics_service(db)
     await metrics_service.start()
 
+    heartbeat_service = HeartbeatService()
+    await heartbeat_service.start()
+
     clan_service = get_clan_service(db)
 
     ml_service = get_ml_service(db)
@@ -100,7 +118,7 @@ async def main():
     daily_bonus_service = get_daily_bonus_service()
     daily_bonus_service.db = db
 
-    achievement_service = get_achievement_service()
+    achievement_service = get_achievement_service(db)
 
     chaos_service = get_chaos_service()
 
@@ -121,6 +139,9 @@ async def main():
     dp = Dispatcher()
 
     # Register middlewares (order matters!)
+    # Ban first: a banned account must not reach the rate limiter's counters
+    # or any other handler.
+    dp.message.middleware(BanMiddleware())
     dp.message.middleware(ErrorHandlingMiddleware())
     dp.message.middleware(LoggingMiddleware())
     dp.message.middleware(RateLimitMiddleware())
@@ -128,6 +149,7 @@ async def main():
     # Register handlers
     dp.include_router(commands_router)
     dp.include_router(features_router)
+    dp.include_router(admin_router)
 
     # Set bot commands
     await bot.set_my_commands([
@@ -139,7 +161,6 @@ async def main():
         BotCommand(command="top_all", description="🏆 Общий топ"),
         BotCommand(command="daily", description="🎁 Ежедневный бонус"),
         BotCommand(command="achievements", description="🏅 Достижения"),
-        BotCommand(command="app", description="🌐 Веб-приложение"),
         BotCommand(command="clan", description="🏷 Мой клан"),
         BotCommand(command="clan_create", description="🏷 Создать клан"),
         BotCommand(command="clan_invite", description="📨 Пригласить в клан"),
@@ -148,11 +169,10 @@ async def main():
         BotCommand(command="clan_transfer", description="👑 Передать владение кланом"),
         BotCommand(command="help", description="❓ Помощь"),
         BotCommand(command="recommend", description="🤖 Рекомендации"),
-        BotCommand(command="chaos", description="🧪 Chaos Engineering (admin)"),
     ])
 
     # Start web server
-    web_app = await create_web_app(db, redis, settings, bot)
+    web_app = await create_web_app(db, settings, bot)
     web_runner = await run_web_server(web_app, settings.web_host, settings.web_port)
     logger.info("web_server_started", host=settings.web_host, port=settings.web_port)
 
@@ -188,10 +208,10 @@ async def main():
 
         await cleanup_service.stop()
         await metrics_service.stop()
+        await heartbeat_service.stop()
         await web_runner.cleanup()
         await bot.session.close()
         await db.close()
-        await close_redis()
         logger.info("bot_stopped")
 
 

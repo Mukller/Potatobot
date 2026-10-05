@@ -1,4 +1,4 @@
-"""Feature handlers: chaos, clan, inline, ml_recommendations."""
+"""Feature handlers: clan, inline, ml_recommendations. Chaos lives in the admin panel."""
 
 import time
 import random
@@ -8,9 +8,12 @@ from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from app.config import get_settings
 from app.utils.logging import get_logger
-from app.utils.formatting import format_kg
+from app.utils.formatting import format_kg, escape_html, truncate
 from app.utils.validators import validate_username
-from app.services import get_clan_service, get_ml_service, get_achievement_service
+from app.services import (
+    get_clan_service, get_ml_service, get_achievement_service,
+    get_daily_bonus_service,
+)
 
 router = Router()
 logger = get_logger(__name__)
@@ -41,7 +44,7 @@ async def recommend_handler(message: Message):
         priority_emoji = "🔥" if rec.priority >= 8 else "⭐" if rec.priority >= 5 else "💡"
         lines.append(
             f"{i}. {priority_emoji} <b>{rec.title}</b>\n"
-            f"   {rec.description}\n"
+            f"   {escape_html(rec.description)}\n"
         )
 
     kb = InlineKeyboardBuilder()
@@ -67,7 +70,7 @@ async def recommend_refresh_callback(callback: CallbackQuery):
         priority_emoji = "🔥" if rec.priority >= 8 else "⭐" if rec.priority >= 5 else "💡"
         lines.append(
             f"{i}. {priority_emoji} <b>{rec.title}</b>\n"
-            f"   {rec.description}\n"
+            f"   {escape_html(rec.description)}\n"
         )
 
     kb = InlineKeyboardBuilder()
@@ -108,7 +111,7 @@ async def recommend_profile_callback(callback: CallbackQuery):
         lines.append(f"📅 Любимый день: <b>{days[profile.favorite_day]}</b>")
 
     if clan:
-        lines.append(f"🏷 Клан: <b>{clan.name}</b> [{clan.tag}]")
+        lines.append(f"🏷 Клан: <b>{escape_html(clan.name)}</b> [{escape_html(clan.tag)}]")
 
     kb = InlineKeyboardBuilder()
     kb.button(text="🔙 К рекомендациям", callback_data="recommend_refresh")
@@ -154,7 +157,7 @@ async def maybe_send_recommendation(bot, user_id: int):
                 await bot.send_message(
                     user_id,
                     f"🤖 <b>Умный совет:</b>\n\n"
-                    f"{rec.title}\n{rec.description}",
+                    f"{escape_html(rec.title)}\n{escape_html(rec.description)}",
                     parse_mode="HTML",
                 )
             except Exception:
@@ -187,11 +190,11 @@ async def clan_handler(message: Message):
         member_lines.append(f"  {role_emoji} {m.username} — {format_kg(m.total_kg)} кг")
 
     lines = [
-        f"🏷 <b>{clan.name}</b> [{clan.tag}]\n",
+        f"🏷 <b>{escape_html(clan.name)}</b> [{escape_html(clan.tag)}]\n",
         f"👑 Владелец: <b>{clan.owner_username}</b>",
         f"👥 Участников: <b>{len(members)}/30</b>",
         f"🥔 Общий вес: <b>{format_kg(clan.total_kg)} кг</b>",
-        f"📝 Описание: {clan.description or '—'}",
+        f"📝 Описание: {escape_html(clan.description) or '—'}",
         "\n👥 <b>Участники:</b>",
     ]
     lines.extend(member_lines)
@@ -249,9 +252,9 @@ async def clan_create_handler(message: Message):
         )
         await message.answer(
             f"🏷 <b>Клан создан!</b>\n\n"
-            f"Название: <b>{clan.name}</b>\n"
-            f"Тэг: <b>[{clan.tag}]</b>\n"
-            f"Описание: {description or '—'}",
+            f"Название: <b>{escape_html(clan.name)}</b>\n"
+            f"Тэг: <b>[{escape_html(clan.tag)}]</b>\n"
+            f"Описание: {escape_html(description) or '—'}",
             parse_mode="HTML",
         )
     except Exception as e:
@@ -316,13 +319,13 @@ async def clan_invites_handler(message: Message):
     for inv in invites:
         clan = await clan_service.get_clan(inv.clan_id)
         if clan:
-            lines.append(f"🏷 <b>{clan.name}</b> [{clan.tag}] — {inv.inviter_username}")
+            lines.append(f"🏷 <b>{escape_html(clan.name)}</b> [{escape_html(clan.tag)}] — {inv.inviter_username}")
             kb.button(
-                text=f"✅ Принять {clan.tag}",
+                text=f"✅ Принять {escape_html(clan.tag)}",
                 callback_data=f"clan_accept_{inv.invite_id}"
             )
             kb.button(
-                text=f"❌ Отклонить {clan.tag}",
+                text=f"❌ Отклонить {escape_html(clan.tag)}",
                 callback_data=f"clan_reject_{inv.invite_id}"
             )
 
@@ -338,7 +341,7 @@ async def clan_accept_callback(callback: CallbackQuery):
         clan = await clan_service.accept_invite(invite_id, callback.from_user.id)
         await callback.message.edit_text(
             f"✅ <b>Ты вступил в клан!</b>\n\n"
-            f"🏷 <b>{clan.name}</b> [{clan.tag}]",
+            f"🏷 <b>{escape_html(clan.name)}</b> [{escape_html(clan.tag)}]",
             parse_mode="HTML",
         )
     except Exception as e:
@@ -421,7 +424,7 @@ async def clan_top_handler(message: Message):
 
     lines = ["🏆 <b>Топ кланов</b>\n"]
     for i, clan in enumerate(clans, 1):
-        lines.append(f"{i}. 🏷 <b>{clan.name}</b> [{clan.tag}] — {format_kg(clan.total_kg)} кг ({len(await clan_service.get_clan_members(clan.clan_id))} чел.)")
+        lines.append(f"{i}. 🏷 <b>{escape_html(clan.name)}</b> [{escape_html(clan.tag)}] — {format_kg(clan.total_kg)} кг ({len(await clan_service.get_clan_members(clan.clan_id))} чел.)")
 
     await message.answer("\n".join(lines), parse_mode="HTML")
 
@@ -495,14 +498,14 @@ async def inline_query_handler(inline_query: InlineQuery):
             members = await clan_service.get_clan_members(clan.clan_id)
             results.append(InlineQueryResultArticle(
                 id=f"clan_{clan.clan_id}",
-                title=f"🏷 {clan.name} [{clan.tag}]",
+                title=f"🏷 {escape_html(clan.name)} [{escape_html(clan.tag)}]",
                 description=f"Участников: {len(members)}/30 | Вес: {format_kg(clan.total_kg)} кг",
                 input_message_content=InputTextMessageContent(
                     message_text=(
-                        f"🏷 <b>{clan.name}</b> [{clan.tag}]\n"
+                        f"🏷 <b>{escape_html(clan.name)}</b> [{escape_html(clan.tag)}]\n"
                         f"👥 Участников: {len(members)}/30\n"
                         f"🥔 Вес: {format_kg(clan.total_kg)} кг\n"
-                        f"📝 {clan.description or '—'}"
+                        f"📝 {escape_html(clan.description) or '—'}"
                     ),
                     parse_mode="HTML",
                 ),
@@ -536,70 +539,10 @@ async def inline_query_handler(inline_query: InlineQuery):
                 message_text=(
                     f"🎁 <b>Ежедневный бонус</b>\n"
                     f"🔥 Стрик: {status.get('streak', 0)} дн.\n"
-                    f"{'✅ Можно забрать!' if status.get('can_claim') else f'⏳ Следующий через: {status.get(\"wait_seconds\", 0)//3600}ч'}"
+                    f"{'✅ Можно забрать!' if status.get('can_claim') else '⏳ Следующий через: {}ч'.format(status.get('wait_seconds', 0) // 3600)}"
                 ),
                 parse_mode="HTML",
             ),
         ))
 
     await inline_query.answer(results, cache_time=1, is_personal=True)
-
-
-# ===== Chaos Engineering handlers =====
-
-@router.message(Command("chaos"))
-async def chaos_handler(message: Message):
-    from app.services import get_chaos_service
-    chaos_service = get_chaos_service()
-    
-    if message.from_user.id not in message.bot.admin_ids:
-        await message.answer("❌ Только для админов")
-        return
-
-    text = message.text.replace("/chaos", "").strip()
-    if not text:
-        status = chaos_service.get_status()
-        lines = [
-            "🧪 <b>Chaos Engineering</b>\n",
-            f"Статус: {'✅ Включен' if status['enabled'] else '❌ Выключен'}",
-            f"Тип эксперимента: {status.get('experiment_type', 'none')}",
-            f"Интенсивность: {status.get('intensity', 0)}%",
-            "",
-            "Команды:",
-            "/chaos enable — включить",
-            "/chaos disable — выключить",
-            "/chaos latency — задержки",
-            "/chaos error — ошибки",
-            "/chaos timeout — таймауты",
-            "/chaos intensity N — интенсивность (0-100)",
-        ]
-        await message.answer("\n".join(lines), parse_mode="HTML")
-        return
-
-    parts = text.split()
-    cmd = parts[0]
-
-    if cmd == "enable":
-        chaos_service.enable()
-        await message.answer("✅ Chaos Engineering включен")
-    elif cmd == "disable":
-        chaos_service.disable()
-        await message.answer("❌ Chaos Engineering выключен")
-    elif cmd == "latency":
-        chaos_service.set_experiment("latency")
-        await message.answer("⚡ Эксперимент: задержки")
-    elif cmd == "error":
-        chaos_service.set_experiment("error")
-        await message.answer("💥 Эксперимент: ошибки")
-    elif cmd == "timeout":
-        chaos_service.set_experiment("timeout")
-        await message.answer("⏱ Эксперимент: таймауты")
-    elif cmd == "intensity" and len(parts) > 1:
-        try:
-            intensity = int(parts[1])
-            chaos_service.set_intensity(max(0, min(100, intensity)))
-            await message.answer(f"📊 Интенсивность: {chaos_service.intensity}%")
-        except ValueError:
-            await message.answer("❌ Неверное значение интенсивности")
-    else:
-        await message.answer("❌ Неизвестная команда")
